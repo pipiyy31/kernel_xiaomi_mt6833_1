@@ -1,5 +1,5 @@
 
-name: POCO M3 Pro 5G - OC + ReSukiSU
+name: POCO M3 Pro 5G - OC + ReSukiSU FINAL
 
 on:
   workflow_dispatch:
@@ -13,14 +13,14 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: Checkout kernel
+      - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
           repository: pipiyy31/kernel_xiaomi_mt6833_1
           ref: flyme
           submodules: recursive
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -30,28 +30,36 @@ jobs:
             libssl-dev libelf-dev make \
             python3 zip git curl
 
-      - name: Apply CPU and GPU OC
+          aarch64-linux-gnu-gcc-9 --version
+
+      - name: Apply CPU and GPU overclock
         run: |
           python3 - <<'PY'
           import re
 
           cpu = 'drivers/misc/mediatek/base/power/cpufreq_v1/src/mach/mt6833/mtk_cpufreq_platform.c'
           s = open(cpu).read()
+
           s, n = re.subn(
               r'(\n[ \t]*)tag_pr_info\("%d, Settle time',
               r'\1lv = CPU_LEVEL_2; /* OC: B24G table */\1tag_pr_info("%d, Settle time',
-              s, count=1)
+              s, count=1
+          )
           assert n == 1, 'CPU OC anchor missing'
           open(cpu, 'w').write(s)
 
           gpu = 'drivers/misc/mediatek/base/power/gpufreq_v1/mt6833/mtk_gpufreq_plat.c'
           s = open(gpu).read()
+
           s, n = re.subn(
               r'(\n[ \t]*)g_segment_min_opp_idx = NUM_OF_OPP_IDX - 1;',
               r'\1g_segment_max_opp_idx = 0; /* OC: full GPU OPP */\1g_segment_min_opp_idx = NUM_OF_OPP_IDX - 1;',
-              s, count=1)
+              s, count=1
+          )
           assert n == 1, 'GPU OC anchor missing'
           open(gpu, 'w').write(s)
+
+          print('CPU and GPU OC patches applied.')
           PY
 
       - name: Fix old kernel build issues
@@ -63,224 +71,254 @@ jobs:
           sed -i 's/#include <clk-mux.h>/#include "clk-mux.h"/' \
             drivers/clk/mediatek/clkdbg-mt6833.c
 
-      - name: Integrate ReSukiSU project
+      - name: Integrate official ReSukiSU
         run: |
           curl -fLSs \
             https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh \
             -o /tmp/resukisu-setup.sh
 
-          bash /tmp/resukisu-setup.sh
+          bash /tmp/resukisu-setup.sh builtin
 
           test -L drivers/kernelsu
           grep -q 'kernelsu' drivers/Makefile
           grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
 
-      - name: Apply required Linux 4.14 manual hooks
+      - name: Apply ReSukiSU Linux 4.14 manual hooks
         run: |
+          set -euo pipefail
+
           python3 - <<'PY'
+          import re
           from pathlib import Path
 
-          def replace_once(file, old, new, label):
+          def patch(file, pattern, replacement, name):
               p = Path(file)
               s = p.read_text()
-              count = s.count(old)
+              updated, count = re.subn(
+                  pattern, replacement, s, count=1,
+                  flags=re.MULTILINE | re.DOTALL
+              )
               if count != 1:
-                  raise SystemExit(f'{label}: expected 1 anchor, found {count}')
-              p.write_text(s.replace(old, new, 1))
+                  raise SystemExit(
+                      f'{name}: expected 1 match, found {count}'
+                  )
+              p.write_text(updated)
+              print('PATCH OK:', name)
 
-          # STAT HOOK
-          f = 'fs/stat.c'
+          # ==========================================
+          # STAT HOOK DECLARATIONS
+          # ==========================================
 
-          replace_once(
-              f,
-              '#if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)\nSYSCALL_DEFINE4(newfstatat',
+          patch(
+              'fs/stat.c',
+              r'^#if !defined\(__ARCH_WANT_STAT64\) \|\| defined\(__ARCH_WANT_SYS_NEWFSTATAT\)$',
               '''#ifdef CONFIG_KSU_MANUAL_HOOK
           __attribute__((hot))
-          extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
-          extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
+          extern int ksu_handle_stat(int *dfd,
+                                     const char __user **filename_user,
+                                     int *flags);
+          extern void ksu_handle_newfstat_ret(
+              unsigned int *fd, struct stat __user **statbuf_ptr);
           #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
-          extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);
+          extern void ksu_handle_fstat64_ret(
+              unsigned long *fd, struct stat64 __user **statbuf_ptr);
           #endif
           #endif
 
-          #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
-          SYSCALL_DEFINE4(newfstatat''',
-              'stat hook declarations'
+          #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)''',
+              'stat declarations'
           )
 
-          replace_once(
-              f,
-              '''\tstruct kstat stat;
-          \tint error;
+          # ==========================================
+          # newfstatat HOOK
+          # ==========================================
 
-          \terror = vfs_fstatat(dfd, filename, &stat, flag);''',
-              '''\tstruct kstat stat;
-          \tint error;
+          patch(
+              'fs/stat.c',
+              r'(SYSCALL_DEFINE4\(newfstatat,[\s\S]*?\n\tint error;\n)',
+              r'''\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
           \tksu_handle_stat(&dfd, &filename, &flag);
           #endif
-
-          \terror = vfs_fstatat(dfd, filename, &stat, flag);''',
-              'newfstatat hook'
+          ''',
+              'newfstatat'
           )
 
-          replace_once(
-              f,
-              '''\tif (!error)
-          \t\terror = cp_new_stat(&stat, statbuf);
+          # ==========================================
+          # newfstat RETURN HOOK
+          # ==========================================
 
-          \treturn error;
-          }
-
-          SYSCALL_DEFINE4(readlinkat''',
-              '''\tif (!error)
-          \t\terror = cp_new_stat(&stat, statbuf);
+          patch(
+              'fs/stat.c',
+              r'(SYSCALL_DEFINE2\(newfstat,[\s\S]*?error = cp_new_stat\(&stat, statbuf\);\n)(\s*return error;)',
+              r'''\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
           \tksu_handle_newfstat_ret(&fd, &statbuf);
           #endif
-
-          \treturn error;
-          }
-
-          SYSCALL_DEFINE4(readlinkat''',
-              'newfstat return hook'
+          \2''',
+              'newfstat return'
           )
 
-          # 32-bit stat64 compatibility hook, when this kernel enables it.
-          s = Path(f).read_text()
-          if 'SYSCALL_DEFINE2(fstat64' in s:
-              replace_once(
-                  f,
-                  '''\tif (!error)
-          \t\terror = cp_new_stat64(&stat, statbuf);
+          # ==========================================
+          # fstat64 RETURN HOOK
+          # ==========================================
 
-          \treturn error;
-          }
-
-          SYSCALL_DEFINE4(fstatat64''',
-                  '''\tif (!error)
-          \t\terror = cp_new_stat64(&stat, statbuf);
+          patch(
+              'fs/stat.c',
+              r'(SYSCALL_DEFINE2\(fstat64,[\s\S]*?error = cp_new_stat64\(&stat, statbuf\);\n)(\s*return error;)',
+              r'''\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
           \tksu_handle_fstat64_ret(&fd, &statbuf);
           #endif
+          \2''',
+              'fstat64 return'
+          )
 
-          \treturn error;
-          }
+          # ==========================================
+          # fstatat64 HOOK
+          # ==========================================
 
-          SYSCALL_DEFINE4(fstatat64''',
-                  'fstat64 return hook'
-              )
-
-              replace_once(
-                  f,
-                  '''\tstruct kstat stat;
-          \tint error;
-          \terror = vfs_fstatat(dfd, filename, &stat, flag);''',
-                  '''\tstruct kstat stat;
-          \tint error;
+          patch(
+              'fs/stat.c',
+              r'(SYSCALL_DEFINE4\(fstatat64,[\s\S]*?\n\tint error;\n)',
+              r'''\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
           \tksu_handle_stat(&dfd, &filename, &flag);
           #endif
-          \terror = vfs_fstatat(dfd, filename, &stat, flag);''',
-                  'fstatat64 hook'
-              )
-
-          # EXECVE HOOK (Linux >= 3.14)
-          f = 'fs/exec.c'
-
-          replace_once(
-              f,
-              '''static int do_execveat_common(int fd, struct filename *filename,
-          \t\t\t      struct user_arg_ptr argv,
-          \t\t\t      struct user_arg_ptr envp,
-          \t\t\t      int flags)
-          {
-          \treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);
-          }''',
-              '''#ifdef CONFIG_KSU_MANUAL_HOOK
-          __attribute__((hot))
-          extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
-          \t\t\t\tvoid *argv, void *envp, int *flags);
-          __attribute__((hot))
-          extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
-          \t\t\t\tvoid *argv, void *envp, int *flags, int *retval);
-          #endif
-
-          static int do_execveat_common(int fd, struct filename *filename,
-          \t\t\t      struct user_arg_ptr argv,
-          \t\t\t      struct user_arg_ptr envp,
-          \t\t\t      int flags)
-          {
-          #ifdef CONFIG_KSU_MANUAL_HOOK
-          \tint retval;
-          \tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-          \tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
-          \tksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
-          \treturn retval;
-          #else
-          \treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);
-          #endif
-          }''',
-              'execve hook'
+          ''',
+              'fstatat64'
           )
 
-          # FACCESSAT HOOK (Linux 4.14 uses the pre-4.19 form)
-          f = 'fs/open.c'
+          # ==========================================
+          # EXECVE HOOK DECLARATIONS
+          # ==========================================
 
-          replace_once(
-              f,
-              'SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)',
+          patch(
+              'fs/exec.c',
+              r'^static int do_execveat_common\(',
               '''#ifdef CONFIG_KSU_MANUAL_HOOK
           __attribute__((hot))
-          extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
-          \t\t\t\tint *mode, int *flags);
+          extern int ksu_handle_execveat(
+              int *fd, struct filename **filename_ptr,
+              void *argv, void *envp, int *flags);
+          __attribute__((hot))
+          extern int ksu_handle_post_execveat(
+              int *fd, struct filename **filename_ptr,
+              void *argv, void *envp, int *flags, int *retval);
           #endif
 
-          SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)''',
+          static int do_execveat_common(''',
+              'execve declarations'
+          )
+
+          # ==========================================
+          # EXECVE HOOK BODY
+          # ==========================================
+
+          patch(
+              'fs/exec.c',
+              r'''static int do_execveat_common\(int fd, struct filename \*filename,
+          \s+struct user_arg_ptr argv,
+          \s+struct user_arg_ptr envp,
+          \s+int flags\)
+          \{
+          \s*return __do_execve_file\(fd, filename, argv, envp, flags, NULL\);
+          \}''',
+              '''static int do_execveat_common(int fd, struct filename *filename,
+                                        struct user_arg_ptr argv,
+                                        struct user_arg_ptr envp,
+                                        int flags)
+          {
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              int retval;
+              ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+              retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
+              ksu_handle_post_execveat(
+                  &fd, &filename, &argv, &envp, &flags, &retval);
+              return retval;
+          #else
+              return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+          #endif
+          }''',
+              'execveat body'
+          )
+
+          # ==========================================
+          # FACCESSAT HOOK
+          # ==========================================
+
+          patch(
+              'fs/open.c',
+              r'^SYSCALL_DEFINE3\(faccessat,',
+              '''#ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_faccessat(
+              int *dfd, const char __user **filename_user,
+              int *mode, int *flags);
+          #endif
+
+          SYSCALL_DEFINE3(faccessat,''',
               'faccessat declaration'
           )
 
-          replace_once(
-              f,
-              '''\tunsigned int lookup_flags = LOOKUP_FOLLOW;
-          \tif (mode & ~S_IRWXO)''',
-              '''\tunsigned int lookup_flags = LOOKUP_FOLLOW;
+          patch(
+              'fs/open.c',
+              r'(SYSCALL_DEFINE3\(faccessat,[\s\S]*?\n\{\n)',
+              r'''\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
           \tksu_handle_faccessat(&dfd, &filename, &mode, NULL);
           #endif
-          \tif (mode & ~S_IRWXO)''',
+          ''',
               'faccessat call'
           )
 
+          # ==========================================
           # REBOOT HOOK
-          f = 'kernel/reboot.c'
+          # ==========================================
 
-          replace_once(
-              f,
-              'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,',
+          patch(
+              'kernel/reboot.c',
+              r'^SYSCALL_DEFINE4\(reboot,',
               '''#ifdef CONFIG_KSU_MANUAL_HOOK
-          extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
+          extern int ksu_handle_sys_reboot(
+              int magic1, int magic2, unsigned int cmd, void __user **arg);
           #endif
 
-          SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,''',
+          SYSCALL_DEFINE4(reboot,''',
               'reboot declaration'
           )
 
-          replace_once(
-              f,
-              '''\tchar buffer[256];
-          \tint ret = 0;
-          \t/* We only trust the superuser''',
-              '''\tchar buffer[256];
-          \tint ret = 0;
+          patch(
+              'kernel/reboot.c',
+              r'(SYSCALL_DEFINE4\(reboot,[\s\S]*?\n\tint ret = 0;\n)',
+              r'''\1
           #ifdef CONFIG_KSU_MANUAL_HOOK
           \tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
           #endif
-          \t/* We only trust the superuser''',
+          ''',
               'reboot call'
           )
 
-          print('All required manual hook patches applied.')
+          # ==========================================
+          # FINAL HOOK AUDIT
+          # ==========================================
+
+          checks = {
+              'stat': ('fs/stat.c', 'ksu_handle_stat'),
+              'newfstat': ('fs/stat.c', 'ksu_handle_newfstat_ret'),
+              'fstat64': ('fs/stat.c', 'ksu_handle_fstat64_ret'),
+              'execve': ('fs/exec.c', 'ksu_handle_execveat'),
+              'post_execve': ('fs/exec.c', 'ksu_handle_post_execveat'),
+              'faccessat': ('fs/open.c', 'ksu_handle_faccessat'),
+              'reboot': ('kernel/reboot.c', 'ksu_handle_sys_reboot'),
+          }
+
+          for name, (file, symbol) in checks.items():
+              if symbol not in Path(file).read_text():
+                  raise SystemExit(f'MISSING HOOK: {name}')
+              print('HOOK VERIFIED:', name)
+
+          print('ALL REQUIRED MANUAL HOOKS PRESENT')
           PY
 
           git diff --check
@@ -299,6 +337,7 @@ jobs:
             -e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
             -e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
             -e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
+            -e KALLSYMS \
             -e KALLSYMS_ALL
 
           make O=out ARCH=arm64 \
@@ -323,9 +362,10 @@ jobs:
 
           test -s out/arch/arm64/boot/Image.gz-dtb
 
-      - name: Package POCO A/B AnyKernel3 ZIP
+      - name: Prepare AnyKernel3 for POCO A/B
         run: |
-          git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
+          git clone --depth 1 \
+            https://github.com/osm0sis/AnyKernel3 ak3
 
           cat > ak3/anykernel.sh <<'AK3'
           properties() { '
@@ -363,15 +403,27 @@ jobs:
           zip -r9 ../camellian-oc-resukisu.zip . \
             -x '.git*' 'README.md' '*placeholder'
 
-      - name: Validate ZIP
+      - name: Verify ZIP
         run: |
+          set -e
           test -s camellian-oc-resukisu.zip
           unzip -t camellian-oc-resukisu.zip
+          unzip -l camellian-oc-resukisu.zip | grep -E \
+            'Image.gz-dtb|anykernel.sh|update-binary'
 
-      - name: Upload final ZIP
+      - name: Upload final kernel ZIP
         uses: actions/upload-artifact@v4
         with:
           name: camellian-oc-resukisu
           path: camellian-oc-resukisu.zip
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log for diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: camellian-build-log
+          path: build.log
+          if-no-files-found: ignore
           retention-days: 7
