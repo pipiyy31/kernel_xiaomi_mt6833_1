@@ -12,20 +12,21 @@ jobs:
     timeout-minutes: 180
 
     steps:
+      # 1. Checkout source asli
       - name: Checkout source
         uses: actions/checkout@v4
         with:
           ref: flyme
           submodules: recursive
 
-      # Integrasi BakaSU
+      # 2. Integrasi BakaSU resmi
       - name: Integrate BakaSU
         run: |
           sudo apt-get update
           sudo apt-get install -y curl
           curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
 
-      # Aktifkan konfigurasi BakaSU
+      # 3. Aktifkan BakaSU Manual Hook
       - name: Enable BakaSU config
         run: |
           DEFCONFIG=arch/arm64/configs/camellia_defconfig
@@ -36,15 +37,302 @@ jobs:
           grep -q '^CONFIG_KSU_MANUAL_HOOK=y' "$DEFCONFIG" || \
             echo 'CONFIG_KSU_MANUAL_HOOK=y' >> "$DEFCONFIG"
 
+          grep -q '^CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y' "$DEFCONFIG" || \
+            echo 'CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y' >> "$DEFCONFIG"
+
+          grep -q '^CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y' "$DEFCONFIG" || \
+            echo 'CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y' >> "$DEFCONFIG"
+
+          grep -q '^CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y' "$DEFCONFIG" || \
+            echo 'CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y' >> "$DEFCONFIG"
+
           grep -q '^CONFIG_KALLSYMS_ALL=y' "$DEFCONFIG" || \
             echo 'CONFIG_KALLSYMS_ALL=y' >> "$DEFCONFIG"
 
+      # 4. Pasang Manual Hook sesuai source kernel MT6833
+      - name: Apply BakaSU manual hooks
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def patch(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              count = s.count(old)
+
+              if count != 1:
+                  raise RuntimeError(
+                      f"{path}: anchor ditemukan {count} kali, seharusnya 1"
+                  )
+
+              p.write_text(s.replace(old, new, 1))
+              print("PATCH OK:", path)
+
+          # ==========================================
+          # FS/STAT.C - stat, newfstat, fstat64
+          # ==========================================
+          f = "fs/stat.c"
+
+          patch(
+              f,
+              '#include <asm/unistd.h>\n',
+              '''#include <asm/unistd.h>
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_stat(int *dfd,
+                  const char __user **filename_user, int *flags);
+
+          extern void ksu_handle_newfstat_ret(unsigned int *fd,
+                  struct stat __user **statbuf_ptr);
+
+          #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+          extern void ksu_handle_fstat64_ret(unsigned long *fd,
+                  struct stat64 __user **statbuf_ptr);
+          #endif
+          #endif
+          '''
+          )
+
+          patch(
+              f,
+              '''SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+                  struct stat __user *, statbuf, int, flag)
+          {
+              struct kstat stat;
+              int error;
+
+              error = vfs_fstatat(dfd, filename, &stat, flag);''',
+              '''SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+                  struct stat __user *, statbuf, int, flag)
+          {
+              struct kstat stat;
+              int error;
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_stat(&dfd, &filename, &flag);
+          #endif
+
+              error = vfs_fstatat(dfd, filename, &stat, flag);'''
+          )
+
+          patch(
+              f,
+              '''SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+          {
+              struct kstat stat;
+              int error = vfs_fstat(fd, &stat);
+              if (!error)
+                  error = cp_new_stat(&stat, statbuf);
+
+              return error;
+          }''',
+              '''SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+          {
+              struct kstat stat;
+              int error = vfs_fstat(fd, &stat);
+              if (!error)
+                  error = cp_new_stat(&stat, statbuf);
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_newfstat_ret(&fd, &statbuf);
+          #endif
+
+              return error;
+          }'''
+          )
+
+          patch(
+              f,
+              '''SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+          {
+              struct kstat stat;
+              int error = vfs_fstat(fd, &stat);
+
+              if (!error)
+                  error = cp_new_stat64(&stat, statbuf);
+
+              return error;
+          }''',
+              '''SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+          {
+              struct kstat stat;
+              int error = vfs_fstat(fd, &stat);
+
+              if (!error)
+                  error = cp_new_stat64(&stat, statbuf);
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_fstat64_ret(&fd, &statbuf);
+          #endif
+
+              return error;
+          }'''
+          )
+
+          patch(
+              f,
+              '''SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+                  struct stat64 __user *, statbuf, int, flag)
+          {
+              struct kstat stat;
+              int error;
+              error = vfs_fstatat(dfd, filename, &stat, flag);''',
+              '''SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+                  struct stat64 __user *, statbuf, int, flag)
+          {
+              struct kstat stat;
+              int error;
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_stat(&dfd, &filename, &flag);
+          #endif
+
+              error = vfs_fstatat(dfd, filename, &stat, flag);'''
+          )
+
+          # ==========================================
+          # FS/EXEC.C - execve hooks
+          # ==========================================
+          f = "fs/exec.c"
+
+          patch(
+              f,
+              '#include "internal.h"\n',
+              '''#include "internal.h"
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_execveat(int *fd,
+                  struct filename **filename_ptr,
+                  void *argv, void *envp, int *flags);
+
+          __attribute__((hot))
+          extern int ksu_handle_post_execveat(int *fd,
+                  struct filename **filename_ptr,
+                  void *argv, void *envp, int *flags, int *retval);
+          #endif
+          '''
+          )
+
+          patch(
+              f,
+              '''{
+              return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+          }
+          int do_execve_file''',
+              '''{
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              int retval;
+
+              ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+
+              retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
+
+              ksu_handle_post_execveat(
+                  &fd, &filename, &argv, &envp, &flags, &retval
+              );
+
+              return retval;
+          #else
+              return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+          #endif
+          }
+          int do_execve_file'''
+          )
+
+          # ==========================================
+          # FS/OPEN.C - faccessat hook
+          # ==========================================
+          f = "fs/open.c"
+
+          patch(
+              f,
+              '#include "internal.h"\n',
+              '''#include "internal.h"
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_faccessat(int *dfd,
+                  const char __user **filename_user,
+                  int *mode, int *flags);
+          #endif
+          '''
+          )
+
+          patch(
+              f,
+              '''SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+          {
+              const struct cred *old_cred;''',
+              '''SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+          {
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+          #endif
+
+              const struct cred *old_cred;'''
+          )
+
+          # ==========================================
+          # KERNEL/REBOOT.C - reboot hook
+          # ==========================================
+          f = "kernel/reboot.c"
+
+          patch(
+              f,
+              '#include <linux/uaccess.h>\n',
+              '''#include <linux/uaccess.h>
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          extern int ksu_handle_sys_reboot(int magic1, int magic2,
+                  unsigned int cmd, void __user **arg);
+          #endif
+          '''
+          )
+
+          patch(
+              f,
+              '''    char buffer[256];
+              int ret = 0;
+              /* We only trust the superuser with rebooting the system. */''',
+              '''    char buffer[256];
+              int ret = 0;
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+          #endif
+
+              /* We only trust the superuser with rebooting the system. */'''
+          )
+
+          print("Semua patch BakaSU manual berhasil diterapkan.")
+          PY
+
+      # 5. Verifikasi patch BakaSU
+      - name: Verify BakaSU hooks
+        run: |
+          set -e
+
+          grep -q 'ksu_handle_stat' fs/stat.c
+          grep -q 'ksu_handle_newfstat_ret' fs/stat.c
+          grep -q 'ksu_handle_fstat64_ret' fs/stat.c
+          grep -q 'ksu_handle_execveat' fs/exec.c
+          grep -q 'ksu_handle_post_execveat' fs/exec.c
+          grep -q 'ksu_handle_faccessat' fs/open.c
+          grep -q 'ksu_handle_sys_reboot' kernel/reboot.c
+
+          git diff --check
+          git diff --stat
+
+      # 6. Install dependencies asli
       - name: Install dependencies (gcc 9, era-correct for 4.14)
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex gcc-9-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev make python3 zip git
           aarch64-linux-gnu-gcc-9 --version | head -1
 
+      # 7. OC CPU 2.4GHz dan GPU 1068MHz - command asli
       - name: Apply OC edits (CPU 2.4GHz, GPU 1068MHz)
         run: |
           python3 - <<'PY'
@@ -66,16 +354,21 @@ jobs:
           PY
           git diff --stat
 
+      # 8. Perbaikan source lama - command asli
       - name: Fix old-source build issues
         run: |
           grep -rlE --include=Makefile --include=Kbuild --include='*.mk' -e '-Werror([[:space:]]|$)' drivers sound | xargs -r sed -i -E 's/-Werror([[:space:]]|$)/\1/g'
           sed -i 's/#include <clk-mux.h>/#include "clk-mux.h"/' drivers/clk/mediatek/clkdbg-mt6833.c
           git diff --stat | tail -1
 
+      # 9. Configure kernel - command asli
       - name: Configure kernel (separate output dir O=out, like the vendor build)
         run: |
           make O=out ARCH=arm64 CC=aarch64-linux-gnu-gcc-9 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- camellia_defconfig
 
+          grep -E 'CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KSU_MANUAL_HOOK_AUTO_|CONFIG_KALLSYMS_ALL=' out/.config
+
+      # 10. Build kernel - command asli
       - name: Build kernel
         run: |
           set +e
@@ -86,6 +379,7 @@ jobs:
             exit 1
           fi
 
+      # 11. Packaging AnyKernel3 - command asli
       - name: Package flashable zip (AnyKernel3)
         run: |
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
@@ -94,6 +388,7 @@ jobs:
           cp ../out/arch/arm64/boot/Image.gz-dtb .
           zip -r9 ../camellian-oc-kernel.zip . -x '.git*' 'README.md' '*placeholder'
 
+      # 12. Upload artifact - command asli
       - name: Upload zip
         uses: actions/upload-artifact@v4
         with:
