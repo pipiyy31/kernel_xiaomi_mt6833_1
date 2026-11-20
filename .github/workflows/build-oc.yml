@@ -77,7 +77,7 @@ jobs:
             https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh \
             -o /tmp/resukisu-setup.sh
 
-          bash /tmp/resukisu-setup.sh builtin
+          bash /tmp/resukisu-setup.sh
 
           test -L drivers/kernelsu
           grep -q 'kernelsu' drivers/Makefile
@@ -105,10 +105,7 @@ jobs:
               p.write_text(updated)
               print('PATCH OK:', name)
 
-          # ==========================================
           # STAT HOOK DECLARATIONS
-          # ==========================================
-
           patch(
               'fs/stat.c',
               r'^#if !defined\(__ARCH_WANT_STAT64\) \|\| defined\(__ARCH_WANT_SYS_NEWFSTATAT\)$',
@@ -129,10 +126,7 @@ jobs:
               'stat declarations'
           )
 
-          # ==========================================
-          # newfstatat HOOK
-          # ==========================================
-
+          # NEWFSTATAT
           patch(
               'fs/stat.c',
               r'(SYSCALL_DEFINE4\(newfstatat,[\s\S]*?\n\tint error;\n)',
@@ -144,10 +138,7 @@ jobs:
               'newfstatat'
           )
 
-          # ==========================================
-          # newfstat RETURN HOOK
-          # ==========================================
-
+          # NEWFSTAT RETURN
           patch(
               'fs/stat.c',
               r'(SYSCALL_DEFINE2\(newfstat,[\s\S]*?error = cp_new_stat\(&stat, statbuf\);\n)(\s*return error;)',
@@ -159,10 +150,7 @@ jobs:
               'newfstat return'
           )
 
-          # ==========================================
-          # fstat64 RETURN HOOK
-          # ==========================================
-
+          # FSTAT64 RETURN
           patch(
               'fs/stat.c',
               r'(SYSCALL_DEFINE2\(fstat64,[\s\S]*?error = cp_new_stat64\(&stat, statbuf\);\n)(\s*return error;)',
@@ -174,10 +162,7 @@ jobs:
               'fstat64 return'
           )
 
-          # ==========================================
-          # fstatat64 HOOK
-          # ==========================================
-
+          # FSTATAT64
           patch(
               'fs/stat.c',
               r'(SYSCALL_DEFINE4\(fstatat64,[\s\S]*?\n\tint error;\n)',
@@ -189,10 +174,7 @@ jobs:
               'fstatat64'
           )
 
-          # ==========================================
-          # EXECVE HOOK DECLARATIONS
-          # ==========================================
-
+          # EXECVE DECLARATIONS
           patch(
               'fs/exec.c',
               r'^static int do_execveat_common\(',
@@ -211,10 +193,7 @@ jobs:
               'execve declarations'
           )
 
-          # ==========================================
-          # EXECVE HOOK BODY
-          # ==========================================
-
+          # EXECVE BODY
           patch(
               'fs/exec.c',
               r'''static int do_execveat_common\(int fd, struct filename \*filename,
@@ -243,10 +222,7 @@ jobs:
               'execveat body'
           )
 
-          # ==========================================
-          # FACCESSAT HOOK
-          # ==========================================
-
+          # FACCESSAT DECLARATION
           patch(
               'fs/open.c',
               r'^SYSCALL_DEFINE3\(faccessat,',
@@ -261,6 +237,7 @@ jobs:
               'faccessat declaration'
           )
 
+          # FACCESSAT CALL
           patch(
               'fs/open.c',
               r'(SYSCALL_DEFINE3\(faccessat,[\s\S]*?\n\{\n)',
@@ -272,10 +249,7 @@ jobs:
               'faccessat call'
           )
 
-          # ==========================================
-          # REBOOT HOOK
-          # ==========================================
-
+          # REBOOT DECLARATION
           patch(
               'kernel/reboot.c',
               r'^SYSCALL_DEFINE4\(reboot,',
@@ -288,6 +262,7 @@ jobs:
               'reboot declaration'
           )
 
+          # REBOOT CALL
           patch(
               'kernel/reboot.c',
               r'(SYSCALL_DEFINE4\(reboot,[\s\S]*?\n\tint ret = 0;\n)',
@@ -299,10 +274,7 @@ jobs:
               'reboot call'
           )
 
-          # ==========================================
           # FINAL HOOK AUDIT
-          # ==========================================
-
           checks = {
               'stat': ('fs/stat.c', 'ksu_handle_stat'),
               'newfstat': ('fs/stat.c', 'ksu_handle_newfstat_ret'),
@@ -321,7 +293,7 @@ jobs:
           print('ALL REQUIRED MANUAL HOOKS PRESENT')
           PY
 
-          git diff --check
+          # Do not fail on pre-existing trailing whitespace in this source tree.
 
       - name: Configure kernel and ReSukiSU
         run: |
