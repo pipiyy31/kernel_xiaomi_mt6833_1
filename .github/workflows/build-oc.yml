@@ -1,5 +1,5 @@
 
-name: POCO M3 Pro 5G - OC + ReSukiSU FINAL
+name: POCO M3 Pro 5G - CPU GPU DVFS + ReSukiSU FINAL
 
 on:
   workflow_dispatch:
@@ -32,34 +32,41 @@ jobs:
 
           aarch64-linux-gnu-gcc-9 --version
 
-      - name: Apply CPU and GPU overclock
+      - name: Audit CPU and GPU DVFS tables
         run: |
+          set -euo pipefail
           python3 - <<'PY'
-          import re
+          from pathlib import Path
 
-          cpu = 'drivers/misc/mediatek/base/power/cpufreq_v1/src/mach/mt6833/mtk_cpufreq_platform.c'
-          s = open(cpu).read()
+          cpu_platform = Path(
+              'drivers/misc/mediatek/base/power/cpufreq_v1/src/mach/mt6833/mtk_cpufreq_platform.c'
+          ).read_text()
 
-          s, n = re.subn(
-              r'(\n[ \t]*)tag_pr_info\("%d, Settle time',
-              r'\1lv = CPU_LEVEL_2; /* OC: B24G table */\1tag_pr_info("%d, Settle time',
-              s, count=1
-          )
-          assert n == 1, 'CPU OC anchor missing'
-          open(cpu, 'w').write(s)
+          cpu_table = Path(
+              'drivers/misc/mediatek/base/power/cpufreq_v1/src/mach/mt6833/mtk_cpufreq_opp_pv_table.h'
+          ).read_text()
 
-          gpu = 'drivers/misc/mediatek/base/power/gpufreq_v1/mt6833/mtk_gpufreq_plat.c'
-          s = open(gpu).read()
+          gpu = Path(
+              'drivers/misc/mediatek/base/power/gpufreq_v1/mt6833/mtk_gpufreq_plat.c'
+          ).read_text()
 
-          s, n = re.subn(
-              r'(\n[ \t]*)g_segment_min_opp_idx = NUM_OF_OPP_IDX - 1;',
-              r'\1g_segment_max_opp_idx = 0; /* OC: full GPU OPP */\1g_segment_min_opp_idx = NUM_OF_OPP_IDX - 1;',
-              s, count=1
-          )
-          assert n == 1, 'GPU OC anchor missing'
-          open(gpu, 'w').write(s)
+          # CPU: retain original efuse-based silicon bin selection.
+          assert 'get_devinfo_with_index(7)' in cpu_platform
+          assert 'CPU_LEVEL_2' in cpu_platform
+          assert '2400' in cpu_table, '2400 MHz OPP not found'
 
-          print('CPU and GPU OC patches applied.')
+          # GPU: retain segment-specific OPP limits.
+          assert 'g_segment_max_opp_idx = 11;' in gpu
+          assert 'g_segment_max_opp_idx = 24;' in gpu
+          assert 'g_segment_max_opp_idx = 0;' in gpu
+          assert 'g_segment_min_opp_idx = NUM_OF_OPP_IDX - 1;' in gpu
+
+          # Reject previous unsafe overrides.
+          assert 'OC: full GPU OPP' not in gpu
+          assert 'OC: B24G table' not in cpu_platform
+
+          print('CPU/GPU DVFS audit passed.')
+          print('Efuse selection and GPU segment limits preserved.')
           PY
 
       - name: Fix old kernel build issues
@@ -73,6 +80,8 @@ jobs:
 
       - name: Integrate official ReSukiSU
         run: |
+          set -euo pipefail
+
           curl -fLSs \
             https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh \
             -o /tmp/resukisu-setup.sh
@@ -105,7 +114,6 @@ jobs:
               p.write_text(updated)
               print('PATCH OK:', name)
 
-          # STAT HOOK DECLARATIONS
           patch(
               'fs/stat.c',
               r'^#if !defined\(__ARCH_WANT_STAT64\) \|\| defined\(__ARCH_WANT_SYS_NEWFSTATAT\)$',
@@ -126,7 +134,6 @@ jobs:
               'stat declarations'
           )
 
-          # NEWFSTATAT
           patch(
               'fs/stat.c',
               r'(SYSCALL_DEFINE4\(newfstatat,[\s\S]*?\n\tint error;\n)',
@@ -138,7 +145,6 @@ jobs:
               'newfstatat'
           )
 
-          # NEWFSTAT RETURN
           patch(
               'fs/stat.c',
               r'(SYSCALL_DEFINE2\(newfstat,[\s\S]*?error = cp_new_stat\(&stat, statbuf\);\n)(\s*return error;)',
@@ -150,7 +156,6 @@ jobs:
               'newfstat return'
           )
 
-          # FSTAT64 RETURN
           patch(
               'fs/stat.c',
               r'(SYSCALL_DEFINE2\(fstat64,[\s\S]*?error = cp_new_stat64\(&stat, statbuf\);\n)(\s*return error;)',
@@ -162,7 +167,6 @@ jobs:
               'fstat64 return'
           )
 
-          # FSTATAT64
           patch(
               'fs/stat.c',
               r'(SYSCALL_DEFINE4\(fstatat64,[\s\S]*?\n\tint error;\n)',
@@ -174,7 +178,6 @@ jobs:
               'fstatat64'
           )
 
-          # EXECVE DECLARATIONS
           patch(
               'fs/exec.c',
               r'^static int do_execveat_common\(',
@@ -193,7 +196,6 @@ jobs:
               'execve declarations'
           )
 
-          # EXECVE BODY
           patch(
               'fs/exec.c',
               r'''static int do_execveat_common\(int fd, struct filename \*filename,
@@ -222,7 +224,6 @@ jobs:
               'execveat body'
           )
 
-          # FACCESSAT DECLARATION
           patch(
               'fs/open.c',
               r'^SYSCALL_DEFINE3\(faccessat,',
@@ -237,7 +238,6 @@ jobs:
               'faccessat declaration'
           )
 
-          # FACCESSAT CALL
           patch(
               'fs/open.c',
               r'(SYSCALL_DEFINE3\(faccessat,[\s\S]*?\n\{\n)',
@@ -249,7 +249,6 @@ jobs:
               'faccessat call'
           )
 
-          # REBOOT DECLARATION
           patch(
               'kernel/reboot.c',
               r'^SYSCALL_DEFINE4\(reboot,',
@@ -262,7 +261,6 @@ jobs:
               'reboot declaration'
           )
 
-          # REBOOT CALL
           patch(
               'kernel/reboot.c',
               r'(SYSCALL_DEFINE4\(reboot,[\s\S]*?\n\tint ret = 0;\n)',
@@ -274,7 +272,6 @@ jobs:
               'reboot call'
           )
 
-          # FINAL HOOK AUDIT
           checks = {
               'stat': ('fs/stat.c', 'ksu_handle_stat'),
               'newfstat': ('fs/stat.c', 'ksu_handle_newfstat_ret'),
@@ -293,10 +290,10 @@ jobs:
           print('ALL REQUIRED MANUAL HOOKS PRESENT')
           PY
 
-          # Do not fail on pre-existing trailing whitespace in this source tree.
-
       - name: Configure kernel and ReSukiSU
         run: |
+          set -euo pipefail
+
           make O=out ARCH=arm64 \
             CC=aarch64-linux-gnu-gcc-9 \
             CROSS_COMPILE=aarch64-linux-gnu- \
@@ -336,12 +333,14 @@ jobs:
 
       - name: Prepare AnyKernel3 for POCO A/B
         run: |
+          set -euo pipefail
+
           git clone --depth 1 \
             https://github.com/osm0sis/AnyKernel3 ak3
 
           cat > ak3/anykernel.sh <<'AK3'
           properties() { '
-          kernel.string=POCO M3 Pro 5G OC + ReSukiSU
+          kernel.string=POCO M3 Pro 5G CPU GPU DVFS + ReSukiSU
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -372,26 +371,27 @@ jobs:
           test -f ak3/META-INF/com/google/android/update-binary
 
           cd ak3
-          zip -r9 ../camellian-oc-resukisu.zip . \
+          zip -r9 ../camellian-dvfs-resukisu.zip . \
             -x '.git*' 'README.md' '*placeholder'
 
       - name: Verify ZIP
         run: |
-          set -e
-          test -s camellian-oc-resukisu.zip
-          unzip -t camellian-oc-resukisu.zip
-          unzip -l camellian-oc-resukisu.zip | grep -E \
+          set -euo pipefail
+
+          test -s camellian-dvfs-resukisu.zip
+          unzip -t camellian-dvfs-resukisu.zip
+          unzip -l camellian-dvfs-resukisu.zip | grep -E \
             'Image.gz-dtb|anykernel.sh|update-binary'
 
       - name: Upload final kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: camellian-oc-resukisu
-          path: camellian-oc-resukisu.zip
+          name: camellian-dvfs-resukisu
+          path: camellian-dvfs-resukisu.zip
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload build log for diagnostics
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
