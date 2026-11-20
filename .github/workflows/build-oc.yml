@@ -50,8 +50,13 @@ jobs:
 
       - name: Build kernel
         run: |
-          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb
-          test -s arch/arm64/boot/Image.gz-dtb
+          set +e
+          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb 2>&1 | tee build.log
+          if [ ! -s arch/arm64/boot/Image.gz-dtb ]; then
+            echo "=== BUILD FAILED, error lines: ==="
+            grep -n -E "error:|Error [0-9]|undefined reference|Killed" build.log | head -40
+            exit 1
+          fi
 
       - name: Package flashable zip (AnyKernel3)
         run: |
