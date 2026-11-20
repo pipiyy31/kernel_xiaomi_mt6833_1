@@ -44,6 +44,14 @@ jobs:
           PY
           git diff --stat
 
+      - name: Fix old-source vs new-compiler build issues
+        run: |
+          # 1) Vendor Makefiles force -Werror; new gcc turns old warnings into errors
+          grep -rlE --include=Makefile --include=Kbuild --include='*.mk' -e '-Werror([[:space:]]|$)' drivers sound | xargs -r sed -i -E 's/-Werror([[:space:]]|$)/\1/g'
+          # 2) clk-mux.h lives next to this file but was included with <>
+          sed -i 's/#include <clk-mux.h>/#include "clk-mux.h"/' drivers/clk/mediatek/clkdbg-mt6833.c
+          git diff --stat | tail -1
+
       - name: Configure kernel
         run: |
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- camellia_defconfig
@@ -51,10 +59,10 @@ jobs:
       - name: Build kernel
         run: |
           set +e
-          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb 2>&1 | tee build.log
+          make -k -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb 2>&1 | tee build.log
           if [ ! -s arch/arm64/boot/Image.gz-dtb ]; then
             echo "=== BUILD FAILED, error lines: ==="
-            grep -n -E "error:|Error [0-9]|undefined reference|Killed" build.log | head -40
+            grep -n -E "error:|Error [0-9]|undefined reference|Killed" build.log | head -60
             exit 1
           fi
 
