@@ -1,0 +1,70 @@
+name: Build OC Kernel (POCO M3 Pro)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: flyme
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev make python3 zip git
+
+      - name: Apply OC edits (CPU 2.4GHz, GPU 1068MHz)
+        run: |
+          python3 - <<'PY'
+          import re
+          cpu = 'drivers/misc/mediatek/base/power/cpufreq_v1/src/mach/mt6833/mtk_cpufreq_platform.c'
+          s = open(cpu).read()
+          s, n = re.subn(r'(\n[ \t]*)tag_pr_info\("%d, Settle time',
+                         r'\1lv = CPU_LEVEL_2; /* OC: B24G table */\1tag_pr_info("%d, Settle time',
+                         s, count=1)
+          assert n == 1, 'cpu anchor not found'
+          open(cpu, 'w').write(s)
+          gpu = 'drivers/misc/mediatek/base/power/gpufreq_v1/mt6833/mtk_gpufreq_plat.c'
+          s = open(gpu).read()
+          s, n = re.subn(r'(\n[ \t]*)g_segment_min_opp_idx = NUM_OF_OPP_IDX - 1;',
+                         r'\1g_segment_max_opp_idx = 0; /* OC: full GPU table */\1g_segment_min_opp_idx = NUM_OF_OPP_IDX - 1;',
+                         s, count=1)
+          assert n == 1, 'gpu anchor not found'
+          open(gpu, 'w').write(s)
+          PY
+          git diff --stat
+
+      - name: Configure kernel
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- camellia_defconfig
+
+      - name: Build kernel
+        run: |
+          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb
+          test -s arch/arm64/boot/Image.gz-dtb
+
+      - name: Package flashable zip (AnyKernel3)
+        run: |
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
+          cd ak3
+          sed -i 's/do_devicecheck=1/do_devicecheck=0/' anykernel.sh
+          cp ../arch/arm64/boot/Image.gz-dtb .
+          zip -r9 ../camellian-oc-kernel.zip . -x '.git*' 'README.md' '*placeholder'
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: camellian-oc-kernel
+          path: camellian-oc-kernel.zip
+          if-no-files-found: error
+          retention-days: 7
