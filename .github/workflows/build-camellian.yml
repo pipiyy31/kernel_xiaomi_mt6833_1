@@ -1,0 +1,48 @@
+
+name: Build POCO M3 Pro 5G Kernel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout Flyme source
+        uses: actions/checkout@v4
+        with:
+          ref: flyme
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev make python3
+
+      - name: Configure kernel
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- camellia_defconfig
+          grep -E 'CONFIG_(MACH_MT6833|MTK_GPU_SUPPORT|MTK_CPU_FREQ|KSU)=' .config || true
+
+      - name: Build kernel
+        run: |
+          make -j2 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb
+
+      - name: Verify output
+        run: |
+          test -s arch/arm64/boot/Image.gz-dtb
+          file arch/arm64/boot/Image.gz-dtb
+          sha256sum arch/arm64/boot/Image.gz-dtb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: camellian-flyme-kernel-baseline
+          path: arch/arm64/boot/Image.gz-dtb
+          if-no-files-found: error
+          retention-days: 7
