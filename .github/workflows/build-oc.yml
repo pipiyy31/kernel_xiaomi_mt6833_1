@@ -18,10 +18,11 @@ jobs:
           ref: flyme
           submodules: recursive
 
-      - name: Install dependencies
+      - name: Install dependencies (gcc 9, era-correct for 4.14)
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev make python3 zip git
+          sudo apt-get install -y bc bison build-essential flex gcc-9-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev make python3 zip git
+          aarch64-linux-gnu-gcc-9 --version | head -1
 
       - name: Apply OC edits (CPU 2.4GHz, GPU 1068MHz)
         run: |
@@ -44,23 +45,23 @@ jobs:
           PY
           git diff --stat
 
-      - name: Fix old-source vs new-compiler build issues
+      - name: Fix old-source build issues
         run: |
-          # 1) Vendor Makefiles force -Werror; new gcc turns old warnings into errors
+          # 1) Vendor Makefiles force -Werror; turn it off so old warnings do not break the build
           grep -rlE --include=Makefile --include=Kbuild --include='*.mk' -e '-Werror([[:space:]]|$)' drivers sound | xargs -r sed -i -E 's/-Werror([[:space:]]|$)/\1/g'
-          # 2) clk-mux.h lives next to this file but was included with <>
+          # 2) harmless safety net: same-dir header included with <>
           sed -i 's/#include <clk-mux.h>/#include "clk-mux.h"/' drivers/clk/mediatek/clkdbg-mt6833.c
           git diff --stat | tail -1
 
-      - name: Configure kernel
+      - name: Configure kernel (separate output dir O=out, like the vendor build)
         run: |
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- camellia_defconfig
+          make O=out ARCH=arm64 CC=aarch64-linux-gnu-gcc-9 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- camellia_defconfig
 
       - name: Build kernel
         run: |
           set +e
-          make -k -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb 2>&1 | tee build.log
-          if [ ! -s arch/arm64/boot/Image.gz-dtb ]; then
+          make O=out -k -j$(nproc) ARCH=arm64 CC=aarch64-linux-gnu-gcc-9 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb 2>&1 | tee build.log
+          if [ ! -s out/arch/arm64/boot/Image.gz-dtb ]; then
             echo "=== BUILD FAILED, error lines: ==="
             grep -n -E "error:|Error [0-9]|undefined reference|Killed" build.log | head -60
             exit 1
@@ -71,7 +72,7 @@ jobs:
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
           cd ak3
           sed -i 's/do_devicecheck=1/do_devicecheck=0/' anykernel.sh
-          cp ../arch/arm64/boot/Image.gz-dtb .
+          cp ../out/arch/arm64/boot/Image.gz-dtb .
           zip -r9 ../camellian-oc-kernel.zip . -x '.git*' 'README.md' '*placeholder'
 
       - name: Upload zip
