@@ -27,7 +27,7 @@ jobs:
       - name: Configure kernel
         run: |
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- camellia_defconfig
-          grep -E 'CONFIG_(MACH_MT6833|MTK_GPU_SUPPORT|MTK_CPU_FREQ|KSU)=' .config || true
+          grep -E 'CONFIG_(MACH_MT6833|KSU|KPROBES)=' .config || true
 
       - name: Build kernel
         run: |
@@ -36,7 +36,6 @@ jobs:
       - name: Verify output
         run: |
           test -s arch/arm64/boot/Image.gz-dtb
-          file arch/arm64/boot/Image.gz-dtb
           sha256sum arch/arm64/boot/Image.gz-dtb
 
       - name: Upload artifact
