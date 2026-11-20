@@ -18,6 +18,27 @@ jobs:
           ref: flyme
           submodules: recursive
 
+      # Integrasi BakaSU
+      - name: Integrate BakaSU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
+
+      # Aktifkan konfigurasi BakaSU
+      - name: Enable BakaSU config
+        run: |
+          DEFCONFIG=arch/arm64/configs/camellia_defconfig
+
+          grep -q '^CONFIG_KSU=y' "$DEFCONFIG" || \
+            echo 'CONFIG_KSU=y' >> "$DEFCONFIG"
+
+          grep -q '^CONFIG_KSU_MANUAL_HOOK=y' "$DEFCONFIG" || \
+            echo 'CONFIG_KSU_MANUAL_HOOK=y' >> "$DEFCONFIG"
+
+          grep -q '^CONFIG_KALLSYMS_ALL=y' "$DEFCONFIG" || \
+            echo 'CONFIG_KALLSYMS_ALL=y' >> "$DEFCONFIG"
+
       - name: Install dependencies (gcc 9, era-correct for 4.14)
         run: |
           sudo apt-get update
@@ -47,9 +68,7 @@ jobs:
 
       - name: Fix old-source build issues
         run: |
-          # 1) Vendor Makefiles force -Werror; turn it off so old warnings do not break the build
           grep -rlE --include=Makefile --include=Kbuild --include='*.mk' -e '-Werror([[:space:]]|$)' drivers sound | xargs -r sed -i -E 's/-Werror([[:space:]]|$)/\1/g'
-          # 2) harmless safety net: same-dir header included with <>
           sed -i 's/#include <clk-mux.h>/#include "clk-mux.h"/' drivers/clk/mediatek/clkdbg-mt6833.c
           git diff --stat | tail -1
 
